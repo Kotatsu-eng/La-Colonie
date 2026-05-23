@@ -6,9 +6,9 @@ import { InteractionHelper } from '../../utils/interactionHelper.js';
 import { logger } from '../../utils/logger.js';
 import { handleInteractionError } from '../../utils/errorHandler.js';
 import { getGuildConfigKey } from '../../utils/database.js'; // ✅ FIX: import statique, pas dynamique
-
+ 
 import ticketConfig from './modules/ticket_dashboard.js';
-
+ 
 export default {
     data: new SlashCommandBuilder()
         .setName("ticket")
@@ -78,14 +78,14 @@ export default {
                 .setDescription("Open the interactive ticket system dashboard"),
         ),
     category: "ticket",
-
+ 
     async execute(interaction, config, client) {
         try {
             const deferred = await InteractionHelper.safeDefer(interaction, { flags: MessageFlags.Ephemeral });
             if (!deferred) {
                 return;
             }
-
+ 
             if (!interaction.member.permissions.has(PermissionFlagsBits.ManageChannels)) {
                 logger.warn('Ticket command permission denied', {
                     userId: interaction.user.id,
@@ -101,27 +101,55 @@ export default {
                     ],
                 });
             }
-
+ 
             const subcommand = interaction.options.getSubcommand();
-
+ 
             if (subcommand === "dashboard") {
                 return ticketConfig.execute(interaction, config, client);
             }
-
+ 
             if (subcommand === "setup") {
                 const existingConfig = await getGuildConfig(client, interaction.guildId);
-
+ 
                 if (existingConfig?.ticketPanelChannelId) {
-                    return await InteractionHelper.safeEditReply(interaction, {
-                        embeds: [
-                            errorEmbed(
-                                'Ticket System Already Active',
-                                `This server already has a ticket system set up (panel in <#${existingConfig.ticketPanelChannelId}>).\n\nOnly one ticket system is supported per server. Use \`/ticket dashboard\` to edit or update the existing setup, or select **Delete System** from the dashboard to remove it and start fresh.`,
-                            ),
-                        ],
+                    // ✅ FIX: Vérifier que le channel existe vraiment sur Discord
+                    // Si le channel a été supprimé manuellement, on nettoie la config et on continue
+                    const panelChannelExists = interaction.guild.channels.cache.get(existingConfig.ticketPanelChannelId)
+                        ?? await interaction.guild.channels.fetch(existingConfig.ticketPanelChannelId).catch(() => null);
+ 
+                    if (panelChannelExists) {
+                        // Le channel existe vraiment → bloquer normalement
+                        return await InteractionHelper.safeEditReply(interaction, {
+                            embeds: [
+                                errorEmbed(
+                                    'Ticket System Already Active',
+                                    `This server already has a ticket system set up (panel in <#${existingConfig.ticketPanelChannelId}>).\n\nOnly one ticket system is supported per server. Use \`/ticket dashboard\` to edit or update the existing setup, or select **Delete System** from the dashboard to remove it and start fresh.`,
+                                ),
+                            ],
+                        });
+                    }
+ 
+                    // Le channel n'existe plus → nettoyer la config fantôme et continuer le setup
+                    logger.warn('Stale ticket panel channel detected, clearing config', {
+                        guildId: interaction.guildId,
+                        staleChannelId: existingConfig.ticketPanelChannelId
                     });
+ 
+                    if (client.db) {
+                        const configKey = getGuildConfigKey(interaction.guildId);
+                        const cleanedConfig = { ...existingConfig };
+                        cleanedConfig.ticketPanelChannelId = null;
+                        cleanedConfig.ticketCategoryId = null;
+                        cleanedConfig.ticketClosedCategoryId = null;
+                        cleanedConfig.ticketStaffRoleId = null;
+                        cleanedConfig.ticketPanelMessage = null;
+                        cleanedConfig.ticketButtonLabel = null;
+                        cleanedConfig.maxTicketsPerUser = null;
+                        cleanedConfig.dmOnClose = null;
+                        await client.db.set(configKey, cleanedConfig);
+                    }
                 }
-
+ 
                 const panelChannel = interaction.options.getChannel("panel_channel");
                 const categoryChannel = interaction.options.getChannel("category");
                 const closedCategoryChannel = interaction.options.getChannel("closed_category");
@@ -130,13 +158,13 @@ export default {
                 const buttonLabel = interaction.options.getString("button_label") || "Create Ticket";
                 const maxTicketsPerUser = interaction.options.getInteger("max_tickets_per_user") || 3;
                 const dmOnClose = interaction.options.getBoolean("dm_on_close") ?? true; // ✅ FIX: ?? true au lieu de !== false
-
+ 
                 const setupEmbed = createEmbed({
                     title: "🎫 Support Tickets",
                     description: panelMessage,
                     color: getColor('info')
                 });
-
+ 
                 const ticketButton = new ActionRowBuilder().addComponents(
                     new ButtonBuilder()
                         .setCustomId("create_ticket")
@@ -144,17 +172,17 @@ export default {
                         .setStyle(ButtonStyle.Primary)
                         .setEmoji("📩"),
                 );
-
+ 
                 try {
                     await panelChannel.send({
                         embeds: [setupEmbed],
                         components: [ticketButton],
                     });
-
+ 
                     if (client.db && interaction.guildId) {
                         // ✅ FIX CRITIQUE: on crée une copie propre au lieu de muter existingConfig (qui peut être null)
                         const currentConfig = existingConfig ? { ...existingConfig } : {};
-
+ 
                         currentConfig.ticketCategoryId = categoryChannel ? categoryChannel.id : null;
                         currentConfig.ticketClosedCategoryId = closedCategoryChannel ? closedCategoryChannel.id : null;
                         currentConfig.ticketStaffRoleId = staffRole ? staffRole.id : null;
@@ -163,11 +191,11 @@ export default {
                         currentConfig.ticketButtonLabel = buttonLabel;
                         currentConfig.maxTicketsPerUser = maxTicketsPerUser;
                         currentConfig.dmOnClose = dmOnClose;
-
+ 
                         // ✅ FIX: import statique déplacé en haut du fichier
                         const configKey = getGuildConfigKey(interaction.guildId);
                         await client.db.set(configKey, currentConfig);
-
+ 
                         logger.info('Ticket configuration saved', {
                             guildId: interaction.guildId,
                             categoryId: categoryChannel?.id,
@@ -177,25 +205,25 @@ export default {
                             dmOnClose: dmOnClose
                         });
                     }
-
+ 
                     let successMessage = `The ticket creation panel has been sent to ${panelChannel}. `;
-
+ 
                     if (categoryChannel) {
                         successMessage += `New tickets will be created in the **${categoryChannel.name}** category. `;
                     } else {
                         successMessage += 'New tickets will be created in a new "Tickets" category. ';
                     }
-
+ 
                     if (closedCategoryChannel) {
                         successMessage += `Closed tickets will be moved to **${closedCategoryChannel.name}**. `;
                     }
-
+ 
                     if (staffRole) {
                         successMessage += `**${staffRole.name}** role will have access to tickets. `;
                     }
-
+ 
                     successMessage += `\n\n**Max Tickets Per User:** ${maxTicketsPerUser}\n**DM on Close:** ${dmOnClose ? 'Enabled' : 'Disabled'}`;
-
+ 
                     await InteractionHelper.safeEditReply(interaction, {
                         embeds: [
                             successEmbed(
@@ -204,7 +232,7 @@ export default {
                             ),
                         ],
                     });
-
+ 
                     logger.info('Ticket panel setup completed', {
                         userId: interaction.user.id,
                         userTag: interaction.user.tag,
@@ -217,7 +245,7 @@ export default {
                         dmOnClose: dmOnClose,
                         commandName: 'ticket_setup'
                     });
-
+ 
                     // ✅ FIX: logEmbed maintenant envoyé dans le channel de logs si configuré
                     const logEmbed = createEmbed({
                         title: "🔧 Ticket System Setup (Configuration Log)",
@@ -248,7 +276,7 @@ export default {
                             inline: false,
                         },
                     );
-
+ 
                     // Envoyer le log dans le channel de logs si configuré
                     const logChannelId = existingConfig?.logChannelId;
                     if (logChannelId) {
@@ -263,7 +291,7 @@ export default {
                             });
                         }
                     }
-
+ 
                 } catch (error) {
                     logger.error('Ticket setup error', {
                         error: error.message,
@@ -272,7 +300,7 @@ export default {
                         guildId: interaction.guildId,
                         commandName: 'ticket_setup'
                     });
-
+ 
                     if (interaction.deferred || interaction.replied) {
                         await InteractionHelper.safeEditReply(interaction, {
                             embeds: [
